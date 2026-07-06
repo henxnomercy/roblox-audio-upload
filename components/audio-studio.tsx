@@ -151,38 +151,47 @@ function floatTo16BitPCM(float32Array: Float32Array) {
 
 async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
   try {
-    // @ts-ignore
-    const { Mp3Encoder } = await import('lamejs')
-    const channels = buffer.numberOfChannels
-    const sampleRate = buffer.sampleRate
-    const mp3Encoder = new Mp3Encoder(channels, sampleRate, bitrate)
-    const blockSize = 1152
-    const mp3Data: Uint8Array[] = []
+    // 1. Import dengan casting paksa ke 'any'
+    const lamejs = await import('lamejs') as any;
+    
+    // 2. Ambil Mp3Encoder dari hasil import
+    // Kadang default export-nya berbeda tergantung versi lamejs
+    const Mp3Encoder = lamejs.Mp3Encoder || lamejs.default?.Mp3Encoder || lamejs;
+    
+    const channels = buffer.numberOfChannels;
+    const sampleRate = buffer.sampleRate;
+    const mp3Encoder = new Mp3Encoder(channels, sampleRate, bitrate);
+    
+    const blockSize = 1152;
+    const mp3Data: Uint8Array[] = [];
 
-    const left = buffer.getChannelData(0)
-    const right = channels > 1 ? buffer.getChannelData(1) : null
+    const left = buffer.getChannelData(0);
+    const right = channels > 1 ? buffer.getChannelData(1) : null;
 
     for (let i = 0; i < buffer.length; i += blockSize) {
-      const leftChunk = left.subarray(i, i + blockSize)
-      const left16 = floatTo16BitPCM(leftChunk)
-      let mp3buf
+      const leftChunk = left.subarray(i, i + blockSize);
+      // PASTIKAN FUNGSI floatTo16BitPCM SUDAH ADA DI FILE INI
+      const left16 = floatTo16BitPCM(leftChunk); 
+      
+      let mp3buf;
       if (right) {
-        const rightChunk = right.subarray(i, i + blockSize)
-        const right16 = floatTo16BitPCM(rightChunk)
-        mp3buf = mp3Encoder.encodeBuffer(left16, right16)
+        const rightChunk = right.subarray(i, i + blockSize);
+        const right16 = floatTo16BitPCM(rightChunk);
+        mp3buf = mp3Encoder.encodeBuffer(left16, right16);
       } else {
-        mp3buf = mp3Encoder.encodeBuffer(left16)
+        mp3buf = mp3Encoder.encodeBuffer(left16);
       }
-      if (mp3buf.length > 0) mp3Data.push(mp3buf)
+      
+      if (mp3buf.length > 0) mp3Data.push(mp3buf);
     }
 
-    const end = mp3Encoder.flush()
-    if (end.length > 0) mp3Data.push(end)
+    const end = mp3Encoder.flush();
+    if (end.length > 0) mp3Data.push(end);
 
-    const blob = new Blob(mp3Data, { type: 'audio/mpeg' })
-    return blob
+    return new Blob(mp3Data as any, { type: 'audio/mpeg' });
   } catch (e) {
-    return null
+    console.error("Encoding Error:", e); // Tambahkan log ini untuk debug
+    return null;
   }
 }
 
