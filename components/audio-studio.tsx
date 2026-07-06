@@ -151,6 +151,7 @@ function floatTo16BitPCM(float32Array: Float32Array) {
 
 async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
   try {
+    // @ts-ignore
     const { Mp3Encoder } = await import('lamejs')
     const channels = buffer.numberOfChannels
     const sampleRate = buffer.sampleRate
