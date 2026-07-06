@@ -56,7 +56,9 @@ async function sendDiscordWebhook({
   }
 
   if (!accepted && errorMessage) {
-    fields.push({ name: "Reason", value: errorMessage.slice(0, 1000) })
+    const rawMessage = String(errorMessage)
+    const clippedMessage = rawMessage.length > 900 ? `${rawMessage.slice(0, 900)}...` : rawMessage
+    fields.push({ name: "Reason", value: clippedMessage })
   }
   if (details) {
     fields.push({ name: "Details", value: details })
@@ -136,6 +138,14 @@ export async function POST(req: NextRequest) {
     robloxForm.append("request", JSON.stringify(requestPayload))
     robloxForm.append("fileContent", audio, audio.name)
 
+    // Debug: tunjukkan payload sebelum mengirim ke Roblox
+    console.log("Payload yang dikirim ke Roblox:", {
+      groupId: groupId.trim(),
+      title: titleStr,
+      hasFile: audio instanceof File,
+      fileName: audio instanceof File ? audio.name : "null",
+    })
+
     // Tembak API Roblox
     const robloxRes = await fetch(ROBLOX_ASSETS_ENDPOINT, {
       method: "POST",
@@ -143,7 +153,9 @@ export async function POST(req: NextRequest) {
       body: robloxForm,
     })
 
+    // Debug: tampilkan respon mentah dari Roblox untuk membantu debugging
     const raw = await robloxRes.text()
+    console.log("Respon asli dari Roblox:", raw)
     let data: any = null
     try { data = raw ? JSON.parse(raw) : null } catch { data = raw }
 

@@ -52,11 +52,13 @@ const ACCENT_SETTINGS = {
 
 const MAX_DURATION_SECONDS = 7 * 60
 const MAX_RENDER_DURATION_SECONDS = MAX_DURATION_SECONDS - 1
+const MAX_ROBLOX_BYTES = 50 * 1024 * 1024 // 50 MB
 
 function formatDuration(seconds: number) {
-  const mins = Math.floor(seconds / 60)
-  const secs = Math.round(seconds % 60)
-  return `${mins}:${secs.toString().padStart(2, "0")}`
+  const totalSecs = Math.round(seconds)
+  const minutes = Math.floor(totalSecs / 60)
+  const secondsPart = totalSecs % 60
+  return `${minutes}:${secondsPart.toString().padStart(2, "0")}`
 }
 
 function trimTrailingSilence(buffer: AudioBuffer, audioContext: AudioContext, threshold = 0.001) {
@@ -143,14 +145,7 @@ async function convertAudioFile(file: File, preset: string) {
   const audioContext = new AudioContext()
   const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0))
 
-  const sampleRate = decoded.sampleRate
-  const shouldTrimToLimit = decoded.length > MAX_DURATION_SECONDS * sampleRate
-  const maxRenderFrames = Math.max(1, Math.floor(MAX_RENDER_DURATION_SECONDS * sampleRate))
-  const renderLength = shouldTrimToLimit ? maxRenderFrames : decoded.length
-  const offlineContext = new OfflineAudioContext(decoded.numberOfChannels, renderLength, sampleRate)
-  const source = offlineContext.createBufferSource()
-  source.buffer = decoded
-
+  // Determine playback modifiers
   let playbackRate = 1
   let gainValue = 1
   let filterFrequency = 22000
@@ -197,6 +192,35 @@ async function convertAudioFile(file: File, preset: string) {
       filterFrequency = 22000
   }
 
+  // Calculate effective duration after playback rate
+  const originalDurationSec = decoded.length / decoded.sampleRate
+  const effectiveDurationSec = originalDurationSec / playbackRate
+
+  // Choose a sampling rate that will keep the final PCM WAV under the Roblox limit.
+  const channels = decoded.numberOfChannels
+  const allowedSampleRates = [44100, 32000, 24000, 22050, 16000, 11025, 8000]
+  const candidateRates = allowedSampleRates.filter((s) => s <= decoded.sampleRate)
+  if (candidateRates.length === 0) candidateRates.push(decoded.sampleRate)
+
+  let chosenSampleRate: number | null = null
+  for (const sr of candidateRates) {
+    const estimatedBytes = Math.ceil(effectiveDurationSec * sr * channels * 2)
+    if (estimatedBytes <= MAX_ROBLOX_BYTES) {
+      chosenSampleRate = sr
+      break
+    }
+  }
+
+  // If none fit, pick the smallest available sample rate to try to reduce size
+  if (!chosenSampleRate) chosenSampleRate = candidateRates[candidateRates.length - 1] ?? decoded.sampleRate
+
+  // Decide render length (clamp to max render seconds)
+  const renderSeconds = Math.min(effectiveDurationSec, MAX_RENDER_DURATION_SECONDS)
+  const renderLength = Math.max(1, Math.floor(renderSeconds * chosenSampleRate))
+
+  const offlineContext = new OfflineAudioContext(decoded.numberOfChannels, renderLength, chosenSampleRate)
+  const source = offlineContext.createBufferSource()
+  source.buffer = decoded
   source.playbackRate.value = playbackRate
 
   const gainNode = offlineContext.createGain()
@@ -371,11 +395,13 @@ export function Dashboard({ credentials, onDisconnect }: DashboardProps) {
     updateQueueItem(item.id, { status: "uploading", assetId: null, errorMessage: null })
 
     try {
-      const finalDuration = item.duration === null ? null : item.duration > MAX_DURATION_SECONDS ? MAX_RENDER_DURATION_SECONDS : item.duration
+      const roundedDuration = item.duration === null ? null : Math.round(item.duration)
+      const clampedDuration = roundedDuration === null ? null : roundedDuration > MAX_DURATION_SECONDS ? MAX_RENDER_DURATION_SECONDS : roundedDuration
+      const convertedDuration = clampedDuration === null ? null : Math.round(clampedDuration / item.speed)
       const details = [
         `Speed: ${item.speed.toFixed(1)}x`,
         `Amplify: ${item.amplify.toFixed(1)}x`,
-        `Duration: ${finalDuration === null ? "auto" : formatDuration(finalDuration)}`,
+        `Duration: ${convertedDuration === null ? "auto" : formatDuration(convertedDuration)}`,
       ].join(" | ")
 
       const uploadFile = item.convertedObjectUrl
@@ -386,6 +412,16 @@ export function Dashboard({ credentials, onDisconnect }: DashboardProps) {
             return new File([blob], fileName, { type: blob.type || "audio/wav" })
           })()
         : item.file
+
+      // Roblox Open Cloud enforces a ~50MB maximum request body. Prevent sending oversized uploads.
+      if (uploadFile.size > MAX_ROBLOX_BYTES) {
+        const msg = `File too large for Roblox upload (\nSize: ${Math.round(uploadFile.size / 1024 / 1024)} MB\nLimit: 50 MB). Try trimming the track or using a lower sample rate/preset.`
+        updateQueueItem(item.id, {
+          status: "failed",
+          errorMessage: msg,
+        })
+        return
+      }
 
       const formData = new FormData()
       formData.append("apiKey", credentials.apiKey)
