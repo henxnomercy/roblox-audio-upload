@@ -140,6 +140,51 @@ function audioBufferToWav(buffer: AudioBuffer) {
   return new Blob([arrayBuffer], { type: "audio/wav" })
 }
 
+function floatTo16BitPCM(float32Array: Float32Array) {
+  const out = new Int16Array(float32Array.length)
+  for (let i = 0; i < float32Array.length; i += 1) {
+    let s = Math.max(-1, Math.min(1, float32Array[i]))
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+  }
+  return out
+}
+
+async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
+  try {
+    const { Mp3Encoder } = await import('lamejs')
+    const channels = buffer.numberOfChannels
+    const sampleRate = buffer.sampleRate
+    const mp3Encoder = new Mp3Encoder(channels, sampleRate, bitrate)
+    const blockSize = 1152
+    const mp3Data: Uint8Array[] = []
+
+    const left = buffer.getChannelData(0)
+    const right = channels > 1 ? buffer.getChannelData(1) : null
+
+    for (let i = 0; i < buffer.length; i += blockSize) {
+      const leftChunk = left.subarray(i, i + blockSize)
+      const left16 = floatTo16BitPCM(leftChunk)
+      let mp3buf
+      if (right) {
+        const rightChunk = right.subarray(i, i + blockSize)
+        const right16 = floatTo16BitPCM(rightChunk)
+        mp3buf = mp3Encoder.encodeBuffer(left16, right16)
+      } else {
+        mp3buf = mp3Encoder.encodeBuffer(left16)
+      }
+      if (mp3buf.length > 0) mp3Data.push(mp3buf)
+    }
+
+    const end = mp3Encoder.flush()
+    if (end.length > 0) mp3Data.push(end)
+
+    const blob = new Blob(mp3Data, { type: 'audio/mpeg' })
+    return blob
+  } catch (e) {
+    return null
+  }
+}
+
 async function convertAudioFile(file: File, preset: string) {
   const arrayBuffer = await file.arrayBuffer()
   const audioContext = new AudioContext()
@@ -237,6 +282,26 @@ async function convertAudioFile(file: File, preset: string) {
 
   const rendered = await offlineContext.startRendering()
   const trimmedRendered = trimTrailingSilence(rendered, audioContext)
+
+  // Try to encode to MP3 at a few bitrates to reduce upload size.
+  const preferredBitrates = [128, 96, 64]
+  for (const br of preferredBitrates) {
+    try {
+      // encodeAudioBufferToMp3 does a dynamic import of lamejs and returns a Blob or null
+      // If encoding fails or lib isn't available, continue to WAV fallback.
+      // eslint-disable-next-line no-await-in-loop
+      const mp3Blob = await encodeAudioBufferToMp3(trimmedRendered, br)
+      if (mp3Blob && mp3Blob.size > 0 && mp3Blob.size <= MAX_ROBLOX_BYTES) {
+        const mp3Url = URL.createObjectURL(mp3Blob)
+        await audioContext.close()
+        return mp3Url
+      }
+    } catch (e) {
+      // ignore and try next bitrate or fallback
+    }
+  }
+
+  // Fallback to WAV if MP3 not available or still too large
   const blob = audioBufferToWav(trimmedRendered)
   const url = URL.createObjectURL(blob)
 
@@ -404,23 +469,47 @@ export function Dashboard({ credentials, onDisconnect }: DashboardProps) {
         `Duration: ${convertedDuration === null ? "auto" : formatDuration(convertedDuration)}`,
       ].join(" | ")
 
-      const uploadFile = item.convertedObjectUrl
-        ? await (async () => {
-            const response = await fetch(item.convertedObjectUrl as string)
-            const blob = await response.blob()
-            const fileName = `${item.file.name.replace(/\.[^/.]+$/, "")}.wav`
-            return new File([blob], fileName, { type: blob.type || "audio/wav" })
-          })()
-        : item.file
+      let uploadFile: File
+      if (item.convertedObjectUrl) {
+        const response = await fetch(item.convertedObjectUrl as string)
+        const blob = await response.blob()
+        const ext = blob.type.includes("mpeg") ? "mp3" : "wav"
+        const fileName = `${item.file.name.replace(/\.[^/.]+$/, "")}.${ext}`
+        uploadFile = new File([blob], fileName, { type: blob.type || "audio/wav" })
+      } else {
+        uploadFile = item.file
+      }
 
-      // Roblox Open Cloud enforces a ~50MB maximum request body. Prevent sending oversized uploads.
+      // Roblox Open Cloud enforces a ~50MB maximum request body. If file is too large,
+      // attempt to auto-convert/resample/encode (using convertAudioFile) and retry once.
       if (uploadFile.size > MAX_ROBLOX_BYTES) {
-        const msg = `File too large for Roblox upload (\nSize: ${Math.round(uploadFile.size / 1024 / 1024)} MB\nLimit: 50 MB). Try trimming the track or using a lower sample rate/preset.`
-        updateQueueItem(item.id, {
-          status: "failed",
-          errorMessage: msg,
-        })
-        return
+        if (!item.convertedObjectUrl) {
+          updateQueueItem(item.id, { status: "converting" })
+          try {
+            const convertedUrl = await convertAudioFile(item.file, item.preset)
+            updateQueueItem(item.id, { convertedObjectUrl: convertedUrl, status: "pending" })
+            const response = await fetch(convertedUrl)
+            const blob = await response.blob()
+            const ext = blob.type.includes("mpeg") ? "mp3" : "wav"
+            const fileName = `${item.file.name.replace(/\.[^/.]+$/, "")}.${ext}`
+            uploadFile = new File([blob], fileName, { type: blob.type || "audio/wav" })
+          } catch (e) {
+            updateQueueItem(item.id, {
+              status: "failed",
+              errorMessage: e instanceof Error ? e.message : "Conversion failed.",
+            })
+            return
+          }
+        }
+
+        if (uploadFile.size > MAX_ROBLOX_BYTES) {
+          const msg = `File too large for Roblox upload (\nSize: ${Math.round(uploadFile.size / 1024 / 1024)} MB\nLimit: 50 MB). Try trimming the track or using a lower sample rate/preset.`
+          updateQueueItem(item.id, {
+            status: "failed",
+            errorMessage: msg,
+          })
+          return
+        }
       }
 
       const formData = new FormData()
