@@ -152,11 +152,8 @@ function floatTo16BitPCM(float32Array: Float32Array) {
 async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
   try {
     // 1. Import dengan casting paksa ke 'any'
-    const lamejs = await import('lamejs') as any;
-    
-    // 2. Ambil Mp3Encoder dari hasil import
-    // Kadang default export-nya berbeda tergantung versi lamejs
-    const Mp3Encoder = lamejs.Mp3Encoder || lamejs.default?.Mp3Encoder || lamejs;
+    const lamejs = require('lamejs');
+    const Mp3Encoder = lamejs.Mp3Encoder;
     
     const channels = buffer.numberOfChannels;
     const sampleRate = buffer.sampleRate;
