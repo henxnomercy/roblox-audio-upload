@@ -151,8 +151,18 @@ function floatTo16BitPCM(float32Array: Float32Array) {
 
 async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
   try {
-    // 1. Import dengan casting paksa ke 'any'
+    // 1. Import library
     const lamejs = require('lamejs');
+    
+    // --- PATCH UNTUK LAMEJS ---
+    // Library ini secara internal mencari MPEGMode dan Lame di scope global (window)
+    // Kita harus memasukkannya secara manual ke window agar dia tidak error.
+    if (typeof window !== 'undefined') {
+        (window as any).MPEGMode = lamejs.MPEGMode || (window as any).MPEGMode;
+        (window as any).Lame = lamejs.Lame || (window as any).Lame;
+    }
+    // --------------------------
+
     const Mp3Encoder = lamejs.Mp3Encoder;
     
     const channels = buffer.numberOfChannels;
@@ -167,7 +177,6 @@ async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
 
     for (let i = 0; i < buffer.length; i += blockSize) {
       const leftChunk = left.subarray(i, i + blockSize);
-      // PASTIKAN FUNGSI floatTo16BitPCM SUDAH ADA DI FILE INI
       const left16 = floatTo16BitPCM(leftChunk); 
       
       let mp3buf;
@@ -187,7 +196,7 @@ async function encodeAudioBufferToMp3(buffer: AudioBuffer, bitrate = 128) {
 
     return new Blob(mp3Data as any, { type: 'audio/mpeg' });
   } catch (e) {
-    console.error("Encoding Error:", e); // Tambahkan log ini untuk debug
+    console.error("Encoding Error:", e);
     return null;
   }
 }
